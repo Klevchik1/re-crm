@@ -213,3 +213,26 @@ DADATA_API_KEY = os.getenv(
     'DADATA_API_KEY',
     '8ceded5bba84e0bd3f20cd7a36057324dc680563',
 )
+
+# --- Yandex.Realty (парсер объявлений) -------------------------------------
+#
+# Парсер используется для автозаполнения карточки объекта по адресу,
+# выбранному в подсказках DaData. Чтобы не поймать бан/капчу от Яндекса,
+# выдерживаем рандомные паузы между запросами и опционально умеем ходить
+# через прокси. Все параметры настраиваются переменными окружения, чтобы
+# можно было регулировать «агрессивность» парсера на разных стендах
+# (dev/staging/prod), не правя код.
+
+YANDEX_REALTY_ENABLED = os.getenv(
+    'YANDEX_REALTY_ENABLED', 'True',
+).lower() == 'true'
+# Пауза между запросами выбирается случайно в диапазоне [MIN; MAX] секунд.
+# 2..5 — щадящий режим, при котором за минуту уходит ~15-20 запросов.
+YANDEX_REALTY_MIN_DELAY = float(os.getenv('YANDEX_REALTY_MIN_DELAY', '2.0'))
+YANDEX_REALTY_MAX_DELAY = float(os.getenv('YANDEX_REALTY_MAX_DELAY', '5.0'))
+YANDEX_REALTY_TIMEOUT = float(os.getenv('YANDEX_REALTY_TIMEOUT', '20.0'))
+# По умолчанию отдаём не больше 10 кандидатов на одну попытку поиска,
+# чтобы не нагружать ни Яндекс, ни фронтенд.
+YANDEX_REALTY_DEFAULT_LIMIT = int(os.getenv('YANDEX_REALTY_DEFAULT_LIMIT', '10'))
+# Пустая строка = без прокси. Формат: 'http://user:pass@host:port'.
+YANDEX_REALTY_PROXY_URL = os.getenv('YANDEX_REALTY_PROXY_URL', '')

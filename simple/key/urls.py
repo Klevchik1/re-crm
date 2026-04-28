@@ -54,6 +54,15 @@ urlpatterns = [
          views.DadataSuggestAddressView.as_view(),
          name='dadata_suggest_address'),
 
+    # Парсер realty.yandex.ru — автозаполнение карточки объекта.
+    # Защищён правами IsEmployee (см. YandexRealtySearchView).
+    path('yandex-realty/search/',
+         views.YandexRealtySearchView.as_view(),
+         name='yandex_realty_search'),
+    path('yandex-realty/import/',
+         views.YandexRealtyImportView.as_view(),
+         name='yandex_realty_import'),
+
     # Сводка для дашборда
     path('dashboard/stats/', views.DashboardStatsView.as_view(),
          name='dashboard_stats'),

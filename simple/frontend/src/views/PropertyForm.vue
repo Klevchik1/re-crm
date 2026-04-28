@@ -85,6 +85,13 @@
         Текущий адрес: {{ existingAddress }}
       </div>
 
+      <!-- Парсер realty.yandex.ru: автозаполнение карточки по адресу. -->
+      <YandexRealtyImport
+        :address="addressPicked"
+        @apply="onYandexApply"
+      />
+      <div v-if="lastImportNote" class="muted">{{ lastImportNote }}</div>
+
       <!-- Характеристики -->
       <h2 class="h3" style="margin-top: 8px">Характеристики</h2>
       <div class="row" style="flex-wrap: wrap; gap: 8px">
@@ -162,6 +169,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import api from '../api'
 import AddressAutocomplete from '../components/AddressAutocomplete.vue'
+import YandexRealtyImport from '../components/YandexRealtyImport.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -187,9 +195,63 @@ const removedPhotoIds = ref([])
 const newPhotoUrl = ref('')
 const loading = ref(false)
 const error = ref('')
+const lastImportNote = ref('')
 
 function onAddressPick(r) {
   addressPicked.value = r
+}
+
+/**
+ * Обработчик автозаполнения формы данными из realty.yandex.ru.
+ *
+ * Подставляем только пустые поля — чтобы не затирать ручной ввод
+ * сотрудника. Фотографии добавляем как внешние URL (отдельный массив
+ * pendingFiles не трогаем): при отправке формы они уйдут в
+ * /property-photos/ через ветку _fromUrl.
+ */
+function onYandexApply(offer) {
+  if (!offer) return
+  const fields = {
+    title:         offer.title,
+    description:   offer.description,
+    price:         offer.price,
+    price_per_sqm: offer.price_per_sqm,
+    area_total:    offer.area_total,
+    area_living:   offer.area_living,
+    area_kitchen:  offer.area_kitchen,
+    rooms_count:   offer.rooms_count,
+    floor_number:  offer.floor_number,
+    total_floors:  offer.total_floors,
+  }
+  const filled = []
+  for (const [key, value] of Object.entries(fields)) {
+    if (value === null || value === undefined || value === '') continue
+    const current = form[key]
+    if (current === null || current === undefined || current === '' || current === 0) {
+      form[key] = value
+      filled.push(key)
+    }
+  }
+  // Фотографии: добавляем только новые URL, без дубликатов.
+  const existingUrls = new Set(
+    photos.value.map(p => p.url || p.image_url).filter(Boolean)
+  )
+  let added = 0
+  for (const url of (offer.photos || [])) {
+    if (!url || existingUrls.has(url)) continue
+    existingUrls.add(url)
+    photos.value.push({
+      url,
+      image_url: url,
+      is_cover: photos.value.length === 0,
+      _new: true,
+      _fromUrl: true,
+    })
+    added += 1
+  }
+  lastImportNote.value =
+    `Подставлено полей: ${filled.length}, добавлено фото: ${added}. `
+    + 'Проверьте значения и при необходимости отредактируйте.'
 }
 
 function onFilesSelected(e) {

@@ -22,6 +22,12 @@ from . import business_rules, models, serializers
 from .business_rules import WorkloadLimitExceeded
 from .dadata import DadataClient
 from .deals_service import create_deal_from_request
+from .yandex_realty import (
+    YandexRealtyParser,
+    YandexRealtyError,
+    YandexRealtyBlocked,
+    YandexRealtyDisabled,
+)
 from .mailing import (
     resend as resend_email,
     enqueue_request_closed,
@@ -200,7 +206,7 @@ class UserViewSet(viewsets.ModelViewSet):
     """
     Управление пользователями.
 
-    Просмотр списка доступен сотрудникам. Назначение роли/типа —
+    Просмотр списк�� доступен сотрудникам. Назначение роли/типа —
     только администратору и менеджеру.
     """
     queryset = User.objects.select_related('role').all()
@@ -714,7 +720,7 @@ class RequestViewSet(viewsets.ModelViewSet):
 
         match = req.matches.filter(pk=match_id).first()
         if not match:
-            return Response({'detail': 'Вариант не найден.'},
+            return Response({'detail': 'Вариант н�� найден.'},
                             status=status.HTTP_404_NOT_FOUND)
 
         # Помечаем как предложенный/подтверждённый
@@ -722,7 +728,7 @@ class RequestViewSet(viewsets.ModelViewSet):
         match.is_rejected = False
         match.save(update_fields=['is_offered', 'is_rejected'])
 
-        # Отправляем сигнал для автозакрытия задач и создания письма
+        # Отправляем сигнал для автозакрытия задач и со��дания письма
         from .signals import property_match_confirmed
         property_match_confirmed.send(
             sender=self.__class__,
@@ -1161,3 +1167,130 @@ class DashboardStatsView(APIView):
                 open_tasks = open_tasks.filter(assignee=user)
             data['tasks_open'] = open_tasks.count()
         return Response(data)
+
+
+# ====== Yandex.Realty (парсер для автозаполнения карточки) ================
+
+class YandexRealtySearchView(APIView):
+    """
+    Поиск похожих объявлений на realty.yandex.ru по адресу из DaData.
+
+    Используется в форме создания/редактирования объекта недвижимости:
+    после того как сотрудник выбрал адрес в подсказках DaData, он может
+    нажать кнопку «Найти на Яндекс.Недвижимости», и эта вьюшка вернёт
+    список кандидатов. Их URL потом передаются во вторую ручку
+    ``/api/yandex-realty/import/``, которая парсит конкретный оффер.
+
+    Тело запроса (POST, application/json)::
+
+        {
+          "address": { ... словарь DaData в формате _normalize() ... },
+          "deal_type":     "kupit"   | "snyat",       // по умолчанию kupit
+          "property_type": "kvartira"|"komnata"|...   // по умолчанию kvartira
+          "limit":         10                          // 1..20
+        }
+
+    Доступ — только для сотрудников: парсер тратит сетевые ресурсы
+    и потенциально может ловить капчу, поэтому давать его клиентам
+    нет смысла. Капча/блок Яндекса превращаются в HTTP 503.
+    """
+    permission_classes = [IsEmployee]
+
+    def post(self, request):
+        address = request.data.get('address') or {}
+        if not isinstance(address, dict) or not (
+            address.get('value') or address.get('unrestricted_value')
+            or address.get('street') or address.get('house')
+        ):
+            return Response(
+                {'detail': 'Передайте поле address из подсказок DaData.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        deal_type = (request.data.get('deal_type') or 'kupit').lower()
+        property_type = (request.data.get('property_type') or 'kvartira').lower()
+        try:
+            limit = int(request.data.get('limit')
+                        or getattr(settings_module(), 'YANDEX_REALTY_DEFAULT_LIMIT', 10))
+        except (TypeError, ValueError):
+            limit = 10
+        limit = max(1, min(limit, 20))
+
+        try:
+            parser = YandexRealtyParser()
+            offers = parser.search_by_address(
+                address,
+                deal_type=deal_type,
+                property_type=property_type,
+                limit=limit,
+            )
+        except YandexRealtyDisabled as exc:
+            return Response(
+                {'detail': str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except YandexRealtyBlocked as exc:
+            return Response(
+                {'detail': 'Яндекс.Недвижимость временно блокирует запросы '
+                           '(возможно, капча). Попробуйте позже.',
+                 'error': str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except (YandexRealtyError, ValueError) as exc:
+            return Response(
+                {'detail': 'Не удалось получить ответ от Яндекс.Недвижимости.',
+                 'error': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        return Response({'results': offers, 'count': len(offers)})
+
+
+class YandexRealtyImportView(APIView):
+    """
+    Разбор конкретного объявления на realty.yandex.ru по URL.
+
+    Возвращает структуру данных, готовую к подстановке в форму карточки
+    объекта (фото, цена, площади, описание и т.д.). Сама запись в БД
+    не создаётся — дальше всё проходит через обычный
+    ``POST /api/properties/`` со штатными правами доступа.
+
+    Тело запроса::
+
+        { "url": "https://realty.yandex.ru/offer/1234567890/" }
+    """
+    permission_classes = [IsEmployee]
+
+    def post(self, request):
+        url = (request.data.get('url') or '').strip()
+        if not url:
+            return Response({'detail': 'Не указан URL объявления.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            parser = YandexRealtyParser()
+            offer = parser.parse_offer(url)
+        except YandexRealtyDisabled as exc:
+            return Response({'detail': str(exc)},
+                            status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        except YandexRealtyBlocked as exc:
+            return Response(
+                {'detail': 'Яндекс.Недвижимость временно блокирует запросы.',
+                 'error': str(exc)},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        except ValueError as exc:
+            return Response({'detail': str(exc)},
+                            status=status.HTTP_400_BAD_REQUEST)
+        except YandexRealtyError as exc:
+            return Response(
+                {'detail': 'Не удалось разобрать страницу объявления.',
+                 'error': str(exc)},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response({'offer': offer})
+
+
+def settings_module():  # pragma: no cover - тонкая обёртка для read-only доступа
+    """Локальный helper, чтобы не импортировать settings глобально."""
+    from django.conf import settings as _s
+    return _s

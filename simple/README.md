@@ -59,6 +59,7 @@ simple/
 │   ├── tests.py
 │   ├── urls.py
 │   ├── views.py
+│   ├── yandex_realty.py
 │   ├── fonts/
 │   │   ├── DejaVuSans.ttf
 │   │   └── DejaVuSans-Bold.ttf
@@ -106,7 +107,8 @@ simple/
         │   ├── StatCard.vue
         │   ├── TaskMineBadge.vue
         │   ├── ToastHost.vue
-        │   └── TopBar.vue
+        │   ├── TopBar.vue
+        │   └── YandexRealtyImport.vue
         ├── store/
         │   ├── auth.js
         │   ├── toasts.js
@@ -148,6 +150,15 @@ simple/
   на сервере, клиент обращается к прокси-эндпоинту
   `/api/dadata/suggest-address/`. Изображения и характеристики объектов
   вводятся сотрудником вручную — DaData даёт только адресные данные.
+- **Автозаполнение карточки — парсер `realty.yandex.ru`.** После выбора
+  адреса в подсказках DaData сотрудник может одним нажатием подтянуть
+  цену, площади, описание и фотографии похожего объявления с
+  Яндекс.Недвижимости. Парсер ходит только серверным запросом
+  (`/api/yandex-realty/search/` и `/api/yandex-realty/import/`),
+  с рандомными паузами между запросами и ротацией User-Agent —
+  чтобы не получить капчу. Все подставленные значения остаются
+  редактируемыми, прежде чем попасть в БД через обычный
+  `POST /api/properties/`.
 - **Регистрация без выбора роли.** `RegisterSerializer` принимает только
   `username`, `email`, `phone`, `password`, и всегда создаёт клиента
   без должности. Назначение роли делает администратор или менеджер
@@ -203,6 +214,8 @@ python manage.py collectstatic --noinput
 | POST  | `/api/auth/refresh/`                        | Обновление `access`                           |
 | GET   | `/api/auth/me/`                             | Текущий пользователь                          |
 | GET   | `/api/dadata/suggest-address/?q=...`        | Подсказки адресов через DaData                |
+| POST  | `/api/yandex-realty/search/`                | Поиск похожих объявлений на realty.yandex.ru  |
+| POST  | `/api/yandex-realty/import/`                | Разбор конкретного объявления по URL          |
 | CRUD  | `/api/users/`                               | Пользователи (список для сотрудников)         |
 | POST  | `/api/users/{id}/assign_role/`              | Назначить тип и должность (админ/менеджер)    |
 | CRUD  | `/api/properties/`                          | Объекты недвижимости                          |
@@ -220,6 +233,63 @@ python manage.py collectstatic --noinput
 | POST  | `/api/tasks/{id}/complete/`                 | Быстро пометить задачу как выполненную        |
 | CRUD  | `/api/cities/`, `/api/streets/`, `/api/houses/`, `/api/addresses/` | Адресная иерархия |
 | GET   | `/api/dashboard/stats/`                     | Сводка для главного экрана                    |
+
+## Парсер Yandex.Realty (автозаполнение карточки)
+
+Чтобы сотрудник не вбивал каждое поле объекта вручную, в проекте есть
+тонкий серверный парсер `realty.yandex.ru` (`key/yandex_realty.py`).
+Он используется только из формы создания/редактирования объекта,
+**после** того как адрес выбран в подсказках DaData.
+
+**Как это работает:**
+
+1. На фронте сотрудник выбирает адрес в `AddressAutocomplete`.
+2. Виджет `YandexRealtyImport.vue` отправляет
+   `POST /api/yandex-realty/search/` с этим адресом и фильтрами
+   (продажа/аренда, тип объекта).
+3. Сервер собирает поисковый URL Яндекса по slug-ам городов
+   (`CITY_SLUGS`), делает один HTTP-запрос с реалистичными заголовками,
+   парсит блок `<script id="__NEXT_DATA__">` (с fallback-ами на JSON-LD
+   и OG-теги) и возвращает список нормализованных предложений.
+4. Сотрудник выбирает подходящее, фронт дёргает
+   `POST /api/yandex-realty/import/` с URL объявления — приходит
+   полный разбор (цена, площади, описание, фото).
+5. Поля формы заполняются только в тех местах, где сотрудник
+   ещё ничего не ввёл. Фотографии добавляются как внешние URL;
+   при сохранении объекта они уезжают в `/api/property-photos/`
+   через штатную ветку с полем `url`.
+
+**Защита от банов и капчи:**
+
+- Между запросами выдерживается случайная пауза
+  `[YANDEX_REALTY_MIN_DELAY; YANDEX_REALTY_MAX_DELAY]` секунд
+  (по умолчанию 2..5 — щадящий режим).
+- Перед первым «живым» запросом сессия «прогревается» обращением
+  к корню сайта, чтобы получить базовые куки.
+- На каждый запрос ротируется `User-Agent` из набора реальных
+  браузеров; ставятся `Sec-Fetch-*`, `Accept-Language` и т.д.
+- Если Яндекс показал капчу или вернул 403/429, парсер выбрасывает
+  `YandexRealtyBlocked`, которая на уровне view превращается в
+  HTTP 503 — фронт показывает понятное сообщение «попробуйте позже».
+- Можно прозрачно подключить HTTP-прокси через
+  `YANDEX_REALTY_PROXY_URL` (поддерживается формат
+  `http://user:pass@host:port`).
+- Парсер можно полностью выключить флагом
+  `YANDEX_REALTY_ENABLED=False` — это превращает обе ручки в HTTP 503.
+
+**Переменные окружения парсера:**
+
+| Переменная | Назначение | По умолчанию |
+|------------|------------|--------------|
+| `YANDEX_REALTY_ENABLED` | Включить/выключить парсер | `True` |
+| `YANDEX_REALTY_MIN_DELAY` | Нижняя граница паузы между запросами, сек | `2.0` |
+| `YANDEX_REALTY_MAX_DELAY` | Верхняя граница паузы, сек | `5.0` |
+| `YANDEX_REALTY_TIMEOUT` | Таймаут HTTP-запроса, сек | `20.0` |
+| `YANDEX_REALTY_DEFAULT_LIMIT` | Макс. число офферов в поиске | `10` |
+| `YANDEX_REALTY_PROXY_URL` | Прокси, если IP уже забанен | `''` |
+
+Юнит-тесты парсера лежат в `key/tests.py` — гоняются как
+`python manage.py test key`.
 
 ## Безопасность
 
@@ -270,6 +340,9 @@ python manage.py collectstatic --noinput
 - **tests.py** — модульные тесты.
 - **urls.py** — URL-роутер приложения.
 - **views.py** — DRF ViewSet'ы и API-эндпоинты.
+- **yandex_realty.py** — парсер объявлений `realty.yandex.ru` для
+  автозаполнения карточки объекта. Тротлинг, ротация User-Agent,
+  детекция CAPTCHA, разбор `__NEXT_DATA__`/JSON-LD/OG-meta.
 - **fonts/DejaVuSans.ttf**, **DejaVuSans-Bold.ttf** — шрифты с кириллицей для PDF.
 - **management/commands/seed_demo.py** — заполнение демо-данными.
 - **management/commands/seed_dictionaries.py** — заполнение справочников.
@@ -316,6 +389,9 @@ python manage.py collectstatic --noinput
 - **TaskMineBadge.vue** — бейдж «моя задача».
 - **ToastHost.vue** — контейнер для toast-уведомлений.
 - **TopBar.vue** — верхняя навигационная панель.
+- **YandexRealtyImport.vue** — виджет автозаполнения карточки объекта
+  данными с realty.yandex.ru: поиск похожих объявлений по адресу
+  DaData, импорт по URL, подстановка пустых полей формы и фото.
 
 ### `frontend/src/store/`
 
