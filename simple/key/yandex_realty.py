@@ -46,6 +46,22 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+# Парсер HTML для BeautifulSoup. Предпочитаем lxml (быстрее и
+# толерантнее к битой разметке Яндекса), но lxml — это C-расширение,
+# которое не всегда собирается под свежие интерпретаторы на Windows
+# (например, под Python 3.14 нужен MSVC + libxml2). Поэтому делаем
+# его опциональным: если в окружении нет lxml — автоматически
+# откатываемся на встроенный 'html.parser' из stdlib.
+try:  # pragma: no cover - проверяется только наличие модуля
+    import lxml  # noqa: F401
+    _BS_PARSER = 'lxml'
+except ImportError:  # pragma: no cover
+    _BS_PARSER = 'html.parser'
+    logger.info(
+        "lxml не установлен, используем встроенный 'html.parser'. "
+        "Для ускорения парсинга поставьте lxml: pip install lxml"
+    )
+
 # --------------------------------------------------------------------------
 # Константы парсера
 # --------------------------------------------------------------------------
@@ -367,7 +383,7 @@ class YandexRealtyParser:
                 )
 
             if response.status_code in (403, 429):
-                # Не повторяем агрессивно — это явный сигнал бана.
+                # Не повторяем агрессивно — это яв��ый сигнал бана.
                 raise YandexRealtyBlocked(
                     f'Yandex.Realty вернул HTTP {response.status_code}. '
                     f'Возможно, IP временно заблокирован.'
@@ -482,7 +498,7 @@ class YandexRealtyParser:
 
         self._warm_up()
         response = self._http_get(offer_url, referer=BASE_URL + '/')
-        soup = BeautifulSoup(response.text, 'lxml')
+        soup = BeautifulSoup(response.text, _BS_PARSER)
 
         offer = YandexOffer(url=offer_url)
 
@@ -591,7 +607,7 @@ class YandexRealtyParser:
             2. JSON-LD блоки                 — резервный SEO-формат
             3. ссылки <a href="/.../offer/..."> — последний шанс
         """
-        soup = BeautifulSoup(html, 'lxml')
+        soup = BeautifulSoup(html, _BS_PARSER)
         offers: list[dict] = []
         seen_urls: set[str] = set()
 
