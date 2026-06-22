@@ -19,15 +19,29 @@
       </div>
     </div>
 
-    <!-- Вкладки для сотрудника -->
+    <!-- Вкладки + поиск для сотрудника -->
     <div v-if="auth.isStaff" class="panel panel--light">
-      <div class="row" style="gap: 8px; flex-wrap: wrap">
-        <button v-for="t in staffTabs" :key="t.value"
-                class="btn btn--sm"
-                :class="{ 'btn--primary': scope === t.value }"
-                @click="scope = t.value">
-          {{ t.label }} ({{ t.count }})
-        </button>
+      <div class="row row--between" style="flex-wrap: wrap; gap: 12px; align-items: center">
+        <div class="row" style="gap: 8px; flex-wrap: wrap">
+          <button v-for="t in staffTabs" :key="t.value"
+                  class="btn btn--sm"
+                  :class="{ 'btn--primary': scope === t.value }"
+                  @click="scope = t.value">
+            {{ t.label }} ({{ t.count }})
+          </button>
+        </div>
+        <div class="search-box">
+          <svg class="search-box__icon" viewBox="0 0 20 20" fill="none"
+               xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M13 13l3.5 3.5" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round"/>
+          </svg>
+          <input class="search-box__input" v-model="clientSearch"
+                 placeholder="Поиск по ФИО клиента…" />
+          <button v-if="clientSearch" class="search-box__clear"
+                  @click="clientSearch = ''">&times;</button>
+        </div>
       </div>
     </div>
 
@@ -102,25 +116,24 @@
       <table class="table">
         <thead>
           <tr>
-            <th>#</th>
-            <th v-if="auth.isStaff">Клиент</th>
+            <th>Клиент</th>
             <th>Агент</th>
             <th>Объект</th>
             <th>Операция</th>
             <th>Бюджет</th>
             <th>Статус</th>
             <th>Создана</th>
-            <th></th>
+            <th v-if="auth.isStaff"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="r in visibleRequests" :key="r.id">
+            <!-- Колонка клиент / ссылка на заявку -->
             <td>
-              <router-link :to="`/requests/${r.id}`" class="link">
-                #{{ r.id }}
+              <router-link :to="`/requests/${r.id}`" class="link client-link">
+                {{ r.client_username || 'Клиент' }}
               </router-link>
             </td>
-            <td v-if="auth.isStaff">{{ r.client_username }}</td>
             <td>
               <span v-if="r.agent_username">{{ r.agent_username }}</span>
               <span v-else class="tag">не назначен</span>
@@ -133,31 +146,30 @@
               <span v-else class="muted">подбор</span>
             </td>
             <td>{{ r.operation_type_name }}</td>
-            <td>
+            <td style="white-space: nowrap">
               {{ formatMoney(r.min_price) }}–{{ formatMoney(r.max_price) }} ₽
             </td>
-            <td><span class="tag" :class="statusClass(r)">{{ r.status_name }}</span></td>
-            <td class="muted">
+            <td>
+              <span class="tag" :class="statusClass(r)">{{ r.status_name }}</span>
+            </td>
+            <td class="muted" style="white-space: nowrap">
               {{ new Date(r.created_at).toLocaleDateString('ru-RU') }}
             </td>
-            <td>
-              <div class="row" style="gap: 6px; flex-wrap: wrap">
-                <button v-if="auth.isStaff && !r.agent"
-                        class="btn btn--sm btn--accent"
+            <!-- Выпадающий список действий — только сотрудникам -->
+            <td v-if="auth.isStaff">
+              <select class="select select--sm actions-select"
+                      :disabled="!hasActions(r)"
+                      @change="handleAction(r, $event.target.value); $event.target.value = ''">
+                <option value="" disabled selected>Действия</option>
+                <option v-if="!r.agent" value="take"
                         :disabled="takeDisabled"
                         :title="takeDisabled
-                          ? 'Достигнут лимит активных заявок (' +
-                            workload.activeRequestsLabel + ')'
-                          : 'Взять заявку в работу'"
-                        @click="takeRequest(r)">
-                  Взять
-                </button>
-                <button v-if="r.can_close"
-                        class="btn btn--sm btn--danger"
-                        @click="closeRequest(r)">
-                  Закрыть
-                </button>
-              </div>
+                          ? 'Лимит: ' + workload.activeRequestsLabel
+                          : undefined">
+                  {{ takeDisabled ? 'Взять (лимит)' : 'Взять в работу' }}
+                </option>
+                <option v-if="r.can_close" value="close">Закрыть заявку</option>
+              </select>
             </td>
           </tr>
         </tbody>
@@ -174,7 +186,6 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import api from '../api'
 import { useAuthStore } from '../store/auth'
 import { useWorkloadStore } from '../store/workload'
-// Общий форматтер денег вынесен в utils/formatters.
 import { formatMoney } from '@/utils/formatters'
 
 const auth = useAuthStore()
@@ -188,7 +199,8 @@ const properties = ref([])
 
 const showForm = ref(false)
 const formError = ref('')
-const scope = ref('all')  // all | unassigned | mine (только для сотрудника)
+const scope = ref('all')  // all | unassigned | mine
+const clientSearch = ref('')
 
 const form = reactive(defaultForm())
 
@@ -209,24 +221,40 @@ const staffTabs = computed(() => [
 ])
 
 const visibleRequests = computed(() => {
-  if (!auth.isStaff) return requests.value
-  if (scope.value === 'unassigned') return requests.value.filter(r => !r.agent)
-  if (scope.value === 'mine') return requests.value.filter(r => r.agent === auth.user?.id)
-  return requests.value
+  let list = requests.value
+
+  // Фильтр по вкладке (только для сотрудника)
+  if (auth.isStaff) {
+    if (scope.value === 'unassigned') list = list.filter(r => !r.agent)
+    else if (scope.value === 'mine') list = list.filter(r => r.agent === auth.user?.id)
+  }
+
+  // Поиск по ФИО клиента
+  const q = clientSearch.value.trim().toLowerCase()
+  if (q) {
+    list = list.filter(r =>
+      (r.client_username || '').toLowerCase().includes(q)
+    )
+  }
+
+  return list
 })
 
 const emptyLabel = computed(() => {
+  if (clientSearch.value.trim()) return 'Клиент не найден.'
   if (!auth.isStaff) return 'Вы пока не подавали заявок.'
   if (scope.value === 'unassigned') return 'Нет нераспределённых заявок.'
   if (scope.value === 'mine') return 'У вас нет активных заявок.'
   return 'Заявок ещё не создано.'
 })
 
-// Кнопка «Взять» блокируется, когда сотрудник упёрся в лимит
-// одновременных активных заявок (для менеджеров/админов ограничения нет).
 const takeDisabled = computed(() =>
   !auth.isManager && !workload.workload.can_take_request,
 )
+
+function hasActions (r) {
+  return (!r.agent) || r.can_close
+}
 
 function statusClass (r) {
   const code = r.status_code
@@ -247,11 +275,15 @@ function toggleForm () {
   }
 }
 
+async function handleAction (r, action) {
+  if (action === 'take') await takeRequest(r)
+  if (action === 'close') await closeRequest(r)
+}
+
 async function load () {
   const requests_req = api.get('/requests/')
   const operations_req = api.get('/operation-types/')
   const properties_req = api.get('/properties/')
-  // Список пользователей доступен только сотрудникам.
   const clients_req = auth.isStaff
     ? api.get('/users/', { params: { user_type: 'client' } })
     : Promise.resolve({ data: [] })
@@ -276,7 +308,6 @@ async function createRequest () {
   formError.value = ''
   try {
     const payload = { ...form }
-    // Клиент не отправляет client/agent — сервер подставит сам.
     if (!auth.isStaff) {
       delete payload.client
       delete payload.agent
@@ -295,9 +326,6 @@ async function createRequest () {
 }
 
 async function takeRequest (r) {
-  // Предварительно проверяем локальный срез лимита — экономим 1 запрос
-  // и сразу объясняем пользователю причину отказа. Бэкенд всё равно
-  // защищён business_rules.assert_can_take_request.
   if (!auth.isManager && !workload.workload.can_take_request) {
     alert(`Нельзя взять заявку: уже ${workload.workload.active_requests} в работе `
       + `из ${workload.workload.max_active_requests}. Закройте текущую.`)
@@ -315,7 +343,6 @@ async function takeRequest (r) {
 async function closeRequest (r) {
   if (!confirm('Закрыть заявку?')) return
   const res = await api.post(`/requests/${r.id}/close/`)
-  // Бекенд может вернуть созданную сделку — сообщим сотруднику.
   if (res?.data?.deal?.deal_number) {
     const d = res.data.deal
     alert(
@@ -335,4 +362,55 @@ onMounted(async () => {
 <style scoped>
 .link { color: var(--c-accent); font-weight: 500; }
 .link:hover { text-decoration: underline; }
+
+.client-link {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+/* Поисковая строка */
+.search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 220px;
+}
+.search-box__icon {
+  position: absolute;
+  left: 10px;
+  color: var(--c-muted);
+  pointer-events: none;
+  flex-shrink: 0;
+}
+.search-box__input {
+  width: 100%;
+  padding: 7px 32px 7px 32px;
+  border: 1.5px solid #d2dedd;
+  border-radius: var(--r-pill);
+  background: var(--c-paper-2);
+  color: var(--c-ink);
+  font-size: 13px;
+  outline: none;
+  transition: border-color .15s;
+}
+.search-box__input:focus { border-color: var(--c-accent); }
+.search-box__clear {
+  position: absolute;
+  right: 10px;
+  font-size: 16px;
+  color: var(--c-muted);
+  line-height: 1;
+  cursor: pointer;
+}
+.search-box__clear:hover { color: var(--c-ink); }
+
+/* Компактный select действий */
+.actions-select {
+  min-width: 120px;
+  cursor: pointer;
+}
+.actions-select:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
 </style>

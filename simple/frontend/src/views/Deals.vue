@@ -1,10 +1,27 @@
 <template>
   <section class="stack">
     <div class="hero" style="padding: 24px 28px">
-      <div class="hero__eyebrow">СДЕЛКИ</div>
-      <h1 class="h2" style="color: #fff; margin-top: 8px">Журнал сделок</h1>
-      <div style="color: rgba(255,255,255,.75); font-size: 14px; margin-top: 6px">
-        Воронка продаж: от первого контакта до завершения сделки
+      <div class="row row--between" style="flex-wrap: wrap; gap: 12px; align-items: center">
+        <div>
+          <div class="hero__eyebrow">СДЕЛКИ</div>
+          <h1 class="h2" style="color: #fff; margin-top: 8px">Журнал сделок</h1>
+          <div style="color: rgba(255,255,255,.75); font-size: 14px; margin-top: 6px">
+            Воронка продаж: от первого контакта до завершения сделки
+          </div>
+        </div>
+        <!-- Поиск -->
+        <div class="search-box">
+          <svg class="search-box__icon" viewBox="0 0 20 20" fill="none"
+               xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+            <circle cx="8.5" cy="8.5" r="5.5" stroke="currentColor" stroke-width="1.6"/>
+            <path d="M13 13l3.5 3.5" stroke="currentColor" stroke-width="1.6"
+                  stroke-linecap="round"/>
+          </svg>
+          <input class="search-box__input" v-model="clientSearch"
+                 placeholder="Поиск по ФИО клиента…" />
+          <button v-if="clientSearch" class="search-box__clear"
+                  @click="clientSearch = ''">&times;</button>
+        </div>
       </div>
     </div>
 
@@ -29,29 +46,29 @@
       <table class="table">
         <thead>
           <tr>
-            <th>Номер</th>
+            <th>Номер / Клиент</th>
             <th>Объект</th>
             <th>Тип</th>
             <th>Стоимость, ₽</th>
             <th>Комиссия</th>
             <th>Статус</th>
             <th>Дата</th>
-            <th>Договор</th>
-            <th></th>
+            <th style="width: 200px"></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="d in filtered" :key="d.id">
+            <!-- Номер сделки + ФИО клиента -->
             <td>
-              <b>{{ d.deal_number }}</b>
-              <div v-if="d.request" class="muted" style="font-size: 11px">
-                из заявки #{{ d.request }}
+              <b style="font-size: 14px">{{ d.deal_number }}</b>
+              <div v-if="d.client_username" class="muted" style="font-size: 12px; margin-top: 2px">
+                {{ d.client_username }}
               </div>
             </td>
             <td>{{ d.property_title || 'Объект №' + d.property }}</td>
             <td><span class="tag tag--accent">{{ d.operation_type_name }}</span></td>
-            <td>{{ formatMoney(d.price_final) }}</td>
-            <td>
+            <td style="white-space: nowrap">{{ formatMoney(d.price_final) }}</td>
+            <td style="white-space: nowrap">
               {{ d.commission_percent || '—' }}%
               <span class="muted">
                 ({{ d.commission_amount ? formatMoney(d.commission_amount) + ' ₽' : '—' }})
@@ -62,35 +79,33 @@
                 {{ d.status_name || '—' }}
               </span>
             </td>
-            <td class="muted">
+            <td class="muted" style="white-space: nowrap">
               {{ new Date(d.deal_date).toLocaleDateString('ru-RU') }}
             </td>
+            <!-- Выпадающий список: договор + смена статуса -->
             <td>
-              <button v-if="d.contract_url"
-                      class="btn btn--sm"
-                      @click="downloadContract(d)">
-                Скачать PDF
-              </button>
-              <button v-else
-                      class="btn btn--sm btn--ghost"
-                      @click="regenerate(d)"
-                      title="Сгенерировать PDF-договор">
-                Сформировать
-              </button>
-            </td>
-            <td>
-              <select class="select select--sm" :value="d.status"
-                      @change="changeStatus(d, $event.target.value)">
-                <option disabled value="">Изменить статус</option>
-                <option v-for="s in statuses" :key="s.id" :value="s.id">
-                  {{ s.name }}
-                </option>
+              <select class="select select--sm actions-select"
+                      @change="handleAction(d, $event.target.value); $event.target.value = ''">
+                <option value="" disabled selected>Действия</option>
+                <optgroup label="Договор">
+                  <option v-if="d.contract_url" value="download">Скачать PDF</option>
+                  <option v-else value="regenerate">Сформировать PDF</option>
+                </optgroup>
+                <optgroup label="Изменить статус">
+                  <option v-for="s in statuses" :key="s.id" :value="`status:${s.id}`">
+                    {{ s.name }}
+                  </option>
+                </optgroup>
               </select>
             </td>
           </tr>
         </tbody>
       </table>
-      <div v-if="!filtered.length" class="empty">Сделок по выбранному статусу нет.</div>
+      <div v-if="!filtered.length" class="empty">
+        {{ clientSearch.trim()
+          ? 'Клиент не найден.'
+          : 'Сделок по выбранному статусу нет.' }}
+      </div>
     </div>
   </section>
 </template>
@@ -98,19 +113,32 @@
 <script setup>
 import { computed, onMounted, ref } from 'vue'
 import api from '../api'
-// Общий форматтер денег вынесен в utils/formatters; fallback '0' сохраняет
-// прежнее поведение «нет суммы → 0».
 import { formatMoney as fmtMoney } from '@/utils/formatters'
 
 const deals = ref([])
 const statuses = ref([])
 const statusFilter = ref('')
+const clientSearch = ref('')
 
 function formatMoney (v) { return fmtMoney(v, '0') }
 
 const filtered = computed(() => {
-  if (!statusFilter.value) return deals.value
-  return deals.value.filter((d) => d.status === statusFilter.value)
+  let list = deals.value
+
+  // Фильтр по статусу
+  if (statusFilter.value) {
+    list = list.filter((d) => d.status === statusFilter.value)
+  }
+
+  // Поиск по ФИО клиента
+  const q = clientSearch.value.trim().toLowerCase()
+  if (q) {
+    list = list.filter(d =>
+      (d.client_username || '').toLowerCase().includes(q)
+    )
+  }
+
+  return list
 })
 
 function countByStatus(id) {
@@ -124,6 +152,15 @@ function statusClass(name) {
   return ''
 }
 
+async function handleAction(deal, action) {
+  if (action === 'download') await downloadContract(deal)
+  else if (action === 'regenerate') await regenerate(deal)
+  else if (action.startsWith('status:')) {
+    const statusId = action.split(':')[1]
+    await changeStatus(deal, statusId)
+  }
+}
+
 async function changeStatus(deal, statusId) {
   if (!statusId) return
   await api.post(`/deals/${deal.id}/change_status/`, { status_id: Number(statusId) })
@@ -131,8 +168,6 @@ async function changeStatus(deal, statusId) {
 }
 
 async function downloadContract(deal) {
-  // Скачиваем бинарник через axios с JWT-заголовком (api.js уже
-  // проставляет Authorization), потом отдаём в <a download>.
   try {
     const res = await api.get(`/deals/${deal.id}/contract/`, { responseType: 'blob' })
     const blob = new Blob([res.data], { type: 'application/pdf' })
@@ -169,3 +204,54 @@ async function load() {
 
 onMounted(load)
 </script>
+
+<style scoped>
+/* Поисковая строка */
+.search-box {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 240px;
+}
+.search-box__icon {
+  position: absolute;
+  left: 10px;
+  color: rgba(255,255,255,.6);
+  pointer-events: none;
+  flex-shrink: 0;
+}
+.search-box__input {
+  width: 100%;
+  padding: 8px 32px 8px 32px;
+  border: 1.5px solid rgba(255,255,255,.2);
+  border-radius: var(--r-pill);
+  background: rgba(255,255,255,.08);
+  color: #fff;
+  font-size: 13px;
+  outline: none;
+  transition: background .15s, border-color .15s;
+}
+.search-box__input::placeholder {
+  color: rgba(255,255,255,.5);
+}
+.search-box__input:focus {
+  border-color: rgba(255,255,255,.4);
+  background: rgba(255,255,255,.12);
+}
+.search-box__clear {
+  position: absolute;
+  right: 10px;
+  font-size: 18px;
+  color: rgba(255,255,255,.6);
+  line-height: 1;
+  cursor: pointer;
+}
+.search-box__clear:hover { color: #fff; }
+
+/* Компактный select действий */
+.actions-select {
+  min-width: 100%;
+  cursor: pointer;
+  font-size: 13px;
+}
+</style>
