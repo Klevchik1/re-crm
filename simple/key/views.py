@@ -4,7 +4,7 @@ REST-представления приложения ``key``.
 Архитектура: ViewSet-ы для CRUD + отдельные APIView для аутентификации
 и интеграции с DaData (подсказки адресов).
 """
-from django.contrib.auth import get_user_model
+from django.contrib.auth import get_user_model, login as auth_login
 from django.db.models import Count, Sum, Q
 from django.utils import timezone
 from rest_framework import status, viewsets, filters
@@ -15,8 +15,10 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
+from rest_framework_simplejwt.tokens import AccessToken
+from rest_framework_simplejwt.exceptions import TokenError, InvalidToken
 
-from django.http import FileResponse, Http404
+from django.http import FileResponse, Http404, HttpResponseRedirect, HttpResponseForbidden
 
 from . import business_rules, models, serializers
 from .business_rules import WorkloadLimitExceeded
@@ -591,7 +593,7 @@ class RequestViewSet(viewsets.ModelViewSet):
 
         # Автосоздание сделки и PDF-договора. Сам метод идемпотентен
         # (OneToOne на Deal.request — повторные вызовы не плодят дублей)
-        # и бросает исключения только на ошибках БД, но не на «нет объекта».
+        # и бро��ает исключения только на ошибках БД, но не на «нет объекта».
         deal = create_deal_from_request(req, actor=request.user)
         enqueue_request_closed(request=req, actor=request.user, deal=deal)
 
@@ -722,7 +724,7 @@ class RequestViewSet(viewsets.ModelViewSet):
         match.is_rejected = False
         match.save(update_fields=['is_offered', 'is_rejected'])
 
-        # Отправляем сигнал для автозакрытия задач и создания письма
+        # Отправляем сигнал для автозакрытия задач и со��дания письма
         from .signals import property_match_confirmed
         property_match_confirmed.send(
             sender=self.__class__,
@@ -1125,6 +1127,58 @@ class OutgoingEmailViewSet(viewsets.ModelViewSet):
         resend_email(email)
         email.refresh_from_db()
         return Response(serializers.OutgoingEmailSerializer(email).data)
+
+
+# ====== Авто-логин в Django Admin через JWT ================================
+
+class AdminAutoLoginView(APIView):
+    """
+    Авторизация в Django Admin без повторного ввода пароля.
+
+    Принимает GET-запрос с параметром ?token=<access_jwt>.
+    Верифицирует токен, создаёт Django-сессию (session auth) для пользователя
+    и перенаправляет на /admin/. Работает только если пользователь is_staff.
+    Использование: фронтенд передаёт токен из localStorage и выполняет
+    редирект на этот эндпоинт — Django сам выдаст session cookie.
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        token_str = request.query_params.get('token', '').strip()
+        if not token_str:
+            return HttpResponseForbidden('Токен не передан.')
+        try:
+            token = AccessToken(token_str)
+            user_id = token.get('user_id')
+        except (TokenError, InvalidToken):
+            return HttpResponseForbidden('Недействительный или просроченный токен.')
+
+        try:
+            user = get_user_model().objects.get(pk=user_id)
+        except get_user_model().DoesNotExist:
+            return HttpResponseForbidden('Пользователь не найден.')
+
+        if not user.is_active:
+            return HttpResponseForbidden('Аккаунт отключён.')
+
+        # Доступ разрешён суперпользователям, is_staff и admin/manager-ролям.
+        has_access = user.is_staff or user.is_superuser or user.is_admin_or_manager
+        if not has_access:
+            return HttpResponseForbidden(
+                'Доступ в Django Admin разрешён только администраторам и менеджерам.'
+            )
+
+        # Django Admin требует is_staff=True. Если у пользователя с admin/manager
+        # ролью этот флаг ещё не выставлен — выставляем автоматически.
+        if not user.is_staff:
+            user.is_staff = True
+            user.save(update_fields=['is_staff'])
+
+        # Логиним пользователя в Django-сессии — теперь браузер получит
+        # session cookie и попадёт в /admin/ без формы входа.
+        auth_login(request, user,
+                   backend='django.contrib.auth.backends.ModelBackend')
+        return HttpResponseRedirect('/admin/')
 
 
 # ====== Сводка для главного экрана ========================================

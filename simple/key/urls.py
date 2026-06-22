@@ -48,6 +48,7 @@ urlpatterns = [
     path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     path('auth/verify/', TokenVerifyView.as_view(), name='token_verify'),
     path('auth/me/', views.MeView.as_view(), name='me'),
+    path('auth/admin-login/', views.AdminAutoLoginView.as_view(), name='admin_auto_login'),
 
     # Подсказки адресов DaData
     path('dadata/suggest-address/',

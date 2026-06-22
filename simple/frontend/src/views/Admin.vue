@@ -63,6 +63,20 @@
         </div>
       </div>
 
+      <!-- Django Admin -->
+      <div class="panel admin-panel" v-if="auth.isSuperuser || auth.isAdmin">
+        <span class="tag tag--panel">Система</span>
+        <h2 class="h2" style="color: #fff; margin-top: 8px">
+          Django Admin
+        </h2>
+        <p style="color: rgba(255,255,255,.75); margin: 4px 0 12px">
+          Прямой доступ к административной панели Django без повторной авторизации.
+        </p>
+        <button class="btn btn--accent" @click="openDjangoAdmin">
+          Открыть Django Admin →
+        </button>
+      </div>
+
       <!-- Справочник должностей -->
       <div class="panel admin-panel">
         <span class="tag tag--panel">Справочник</span>
@@ -151,7 +165,7 @@
           <button class="btn btn--primary btn--sm"
                   :disabled="assignLoading || (!assignUser && !assignUserId)"
                   @click="saveAssign">
-            {{ assignLoading ? 'Сохранение…' : 'Сохранить' }}
+            {{ assignLoading ? 'Сохранение…' : 'С��хранить' }}
           </button>
         </div>
       </div>
@@ -288,6 +302,18 @@ async function removeRole (r) {
     rolesError.value = e.response?.data?.detail
       || 'Не удалось удалить.'
   }
+}
+
+// --- Django Admin авто-логин -----------------------------------------------
+function openDjangoAdmin () {
+  const token = localStorage.getItem('access')
+  if (!token) {
+    alert('Не найден токен авторизации. Войдите в систему заново.')
+    return
+  }
+  // Передаём JWT-токен на бэкенд, который создаст Django-сессию и
+  // перенаправит браузер прямо в /admin/ без формы входа.
+  window.open(`/api/auth/admin-login/?token=${encodeURIComponent(token)}`, '_blank')
 }
 
 // --- Загрузка --------------------------------------------------------------
