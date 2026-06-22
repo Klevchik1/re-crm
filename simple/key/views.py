@@ -19,6 +19,7 @@ from rest_framework_simplejwt.views import TokenObtainPairView
 from django.http import FileResponse, Http404
 
 from . import business_rules, models, serializers
+from .viewing_payments import ViewingPaymentMixin
 from .business_rules import WorkloadLimitExceeded
 from .dadata import DadataClient
 from .deals_service import create_deal_from_request
@@ -722,7 +723,7 @@ class RequestViewSet(viewsets.ModelViewSet):
         match.is_rejected = False
         match.save(update_fields=['is_offered', 'is_rejected'])
 
-        # Отправляем сигнал для автозакрытия задач и создания письма
+        # Отправляем сигнал для автозакрытия задач и со��дания письма
         from .signals import property_match_confirmed
         property_match_confirmed.send(
             sender=self.__class__,
@@ -834,7 +835,7 @@ class DealViewSet(viewsets.ModelViewSet):
         return Response(serializers.DealSerializer(deal).data)
 
 
-class PropertyViewingViewSet(viewsets.ModelViewSet):
+class PropertyViewingViewSet(ViewingPaymentMixin, viewsets.ModelViewSet):
     queryset = models.PropertyViewing.objects.select_related(
         'property', 'client', 'agent'
     ).all()

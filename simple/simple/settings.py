@@ -213,3 +213,19 @@ DADATA_API_KEY = os.getenv(
     'DADATA_API_KEY',
     '8ceded5bba84e0bd3f20cd7a36057324dc680563',
 )
+
+# --- SmartPay (SberDevices) -------------------------------------------------
+#
+# Документация: https://developers.sber.ru/docs/ru/va/about/monetization/payments
+# Тестовый токен работает на боевой среде, сумма ≤ 1 ₽ (100 копеек).
+# Все платежи по тестовому токену автоматически возвращаются в течение месяца.
+#
+# SMARTPAY_TOKEN      — Bearer-токен из Studio SmartPay
+# SMARTPAY_SERVICE_ID — service_id из Studio SmartPay
+# SMARTPAY_AMOUNT     — сумма в копейках (по умолчанию 100 = 1 ₽ для теста)
+# SMARTPAY_TIMEOUT    — таймаут HTTP-запросов в секундах
+
+SMARTPAY_TOKEN = os.getenv('SMARTPAY_TOKEN', '')
+SMARTPAY_SERVICE_ID = os.getenv('SMARTPAY_SERVICE_ID', '')
+SMARTPAY_AMOUNT = int(os.getenv('SMARTPAY_AMOUNT', '100'))
+SMARTPAY_TIMEOUT = int(os.getenv('SMARTPAY_TIMEOUT', '15'))

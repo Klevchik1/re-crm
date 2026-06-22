@@ -137,6 +137,37 @@ export function acceptRequestMatch(requestId, matchId) {
 }
 
 // ---------------------------------------------------------------------------
+// SmartPay — оплата просмотра объекта
+// ---------------------------------------------------------------------------
+
+/**
+ * Создать счёт SmartPay для просмотра (POST /viewings/{id}/initiate_payment/).
+ * Идемпотентен: повторный вызов вернёт уже созданный invoice_id.
+ *
+ * @param {number} viewingId — PK записи PropertyViewing
+ * @returns {{ ok, data: { invoice_id, status, amount, description }, error }}
+ */
+export function initiateViewingPayment(viewingId) {
+  return call(
+    () => api.post(`/viewings/${viewingId}/initiate_payment/`),
+    { bump: false },
+  )
+}
+
+/**
+ * Проверить статус счёта SmartPay (GET /viewings/{id}/payment_status/).
+ *
+ * @param {number} viewingId — PK записи PropertyViewing
+ * @returns {{ ok, data: { invoice_id, status }, error }}
+ */
+export function getViewingPaymentStatus(viewingId) {
+  return call(
+    () => api.get(`/viewings/${viewingId}/payment_status/`),
+    { bump: false },
+  )
+}
+
+// ---------------------------------------------------------------------------
 // Журнал исходящих писем
 // ---------------------------------------------------------------------------
 

@@ -252,6 +252,64 @@
             Клиент подтвердил вариант
           </button>
         </div>
+
+        <!-- SmartPay: оплата просмотра (только для задач типа «Показ объекта») -->
+        <div v-if="task.task_type === 'showing'" class="payment-block" style="margin-top: 20px">
+          <div style="font-weight: 600; font-size: 14px; margin-bottom: 8px">
+            Оплата просмотра через SmartPay
+          </div>
+
+          <!-- Просмотр ещё не найден/загружается -->
+          <div v-if="payment.loadingViewing" class="muted" style="font-size: 13px">
+            Ищем запись просмотра…
+          </div>
+
+          <!-- Просмотр не найден -->
+          <div v-else-if="!payment.viewingId" class="warn">
+            Запись просмотра не найдена. Убедитесь, что просмотр создан в системе для этого клиента и объекта.
+          </div>
+
+          <!-- Просмотр найден — блок оплаты -->
+          <template v-else>
+            <!-- Ещё не инициировали -->
+            <div v-if="!payment.invoiceId">
+              <p class="muted" style="font-size: 13px; margin-bottom: 10px">
+                Создайте счёт SmartPay для просмотра №{{ payment.viewingId }}.
+                Тестовый токен: сумма 1 ₽, реальная карта, возврат за месяц.
+              </p>
+              <button class="btn btn--primary" :disabled="payment.busy"
+                      @click="initiatePayment(payment.viewingId)">
+                {{ payment.busy ? 'Создаём счёт…' : 'Выставить счёт SmartPay' }}
+              </button>
+              <div v-if="payment.error" class="warn" style="margin-top: 8px">
+                {{ payment.error }}
+              </div>
+            </div>
+
+            <!-- Счёт создан — показываем статус -->
+            <div v-else class="payment-status-card">
+              <div class="row" style="gap: 12px; flex-wrap: wrap; align-items: center">
+                <div>
+                  <div style="font-size: 12px; color: #6a7a77; margin-bottom: 2px">Invoice ID</div>
+                  <code style="font-size: 12px">{{ payment.invoiceId }}</code>
+                </div>
+                <div>
+                  <div style="font-size: 12px; color: #6a7a77; margin-bottom: 2px">Статус</div>
+                  <span class="payment-badge" :class="`payment-badge--${(payment.status || '').toLowerCase()}`">
+                    {{ paymentStatusLabel(payment.status) }}
+                  </span>
+                </div>
+                <button class="btn btn--sm" :disabled="payment.busy"
+                        @click="checkPaymentStatus(payment.viewingId)">
+                  {{ payment.busy ? '…' : 'Обновить статус' }}
+                </button>
+              </div>
+              <div v-if="payment.error" class="warn" style="margin-top: 8px">
+                {{ payment.error }}
+              </div>
+            </div>
+          </template>
+        </div>
       </template>
 
       <!-- ШАГ 4 — Завершение -->
@@ -315,6 +373,17 @@ const busy = ref(false)
 const contactNote = ref('')
 const completionSummary = ref('')
 
+// SmartPay — состояние оплаты просмотра
+const payment = reactive({
+  viewingId: null,       // PK PropertyViewing, для которого создан счёт
+  invoiceId: null,       // invoice_id от SmartPay
+  status: null,          // CREATED | PAID | CANCELLED | EXPIRED | UNKNOWN
+  busy: false,           // идёт запрос к SmartPay
+  error: null,           // текст последней ошибки
+  pollTimer: null,       // id setInterval для автопроверки статуса
+  loadingViewing: false, // идёт поиск записи PropertyViewing
+})
+
 // Форма быстрой заявки
 const newRequest = reactive({
   operation_type: null,
@@ -339,7 +408,7 @@ function showToast (message, type = 'success') {
 // Шаги мастера
 // ---------------------------------------------------------------------------
 // Шаг «match» нужен только задачам подбора/показа, для звонков/документов
-// он лишний — помечаем его как skipped и не выводим как активный.
+// он лишний — помечаем его как skipped и не выв��дим как активный.
 const MATCH_TASK_TYPES = ['property_search', 'showing']
 
 const steps = computed(() => {
@@ -434,6 +503,10 @@ async function load () {
   }
 
   await Promise.all(extra)
+
+  // Для задач типа «Показ объекта» — подгружаем запись PropertyViewing,
+  // чтобы блок оплаты SmartPay мог использовать её ID.
+  loadViewingForTask()
 }
 
 // ---------------------------------------------------------------------------
@@ -577,6 +650,128 @@ async function submitComplete () {
 
 // formatDate импортируется из utils/formatters (см. шапку script setup).
 
+// ---------------------------------------------------------------------------
+// SmartPay — загрузка записи просмотра для задачи типа showing
+// ---------------------------------------------------------------------------
+
+/**
+ * Найти запись PropertyViewing, связанную с задачей типа «showing».
+ * Ищем по клиенту + объекту. Результат сохраняется в payment.viewingId.
+ */
+async function loadViewingForTask() {
+  const t = task.value
+  if (!t || t.task_type !== 'showing') return
+  if (!t.client || !t.property) return
+
+  payment.loadingViewing = true
+  try {
+    const res = await api.get('/viewings/', {
+      params: { client: t.client, property: t.property, page_size: 5 },
+    })
+    const list = (res.data.results || res.data || [])
+    if (list.length > 0) {
+      // Берём самый свежий просмотр (список отсортирован по -scheduled_date).
+      payment.viewingId = list[0].id
+    }
+  } catch (_e) {
+    // Не критично — просто не показываем блок оплаты.
+  } finally {
+    payment.loadingViewing = false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// SmartPay — оплата просмотра
+// ---------------------------------------------------------------------------
+
+const PAYMENT_STATUS_LABELS = {
+  CREATED:   'Ожидает оплаты',
+  PAID:      'Оплачен',
+  CANCELLED: 'Отменён',
+  REFUNDED:  'Возврат',
+  EXPIRED:   'Истёк',
+  UNKNOWN:   'Неизвестно',
+  ALREADY_CREATED: 'Ожидает оплаты',
+}
+
+function paymentStatusLabel(s) {
+  return PAYMENT_STATUS_LABELS[s] || s || '—'
+}
+
+/**
+ * Создать счёт SmartPay для просмотра.
+ * viewingId — PK записи PropertyViewing.
+ */
+async function initiatePayment(viewingId) {
+  if (!viewingId) {
+    showToast('К задаче не привязан просмотр объекта', 'error')
+    return
+  }
+  payment.busy = true
+  payment.error = null
+  const { ok, data, error } = await tasksApi.initiateViewingPayment(viewingId)
+  payment.busy = false
+  if (ok) {
+    payment.viewingId = viewingId
+    payment.invoiceId = data.invoice_id
+    payment.status = data.status
+    showToast('Счёт SmartPay создан')
+    // Запускаем автопроверку статуса каждые 10 секунд (до 2 минут).
+    _startPaymentPoll(viewingId)
+  } else {
+    payment.error = error || 'Не удалось создать счёт SmartPay'
+    showToast(payment.error, 'error')
+  }
+}
+
+/**
+ * Вручную обновить статус счёта SmartPay.
+ */
+async function checkPaymentStatus(viewingId) {
+  if (!viewingId) return
+  payment.busy = true
+  payment.error = null
+  const { ok, data, error } = await tasksApi.getViewingPaymentStatus(viewingId)
+  payment.busy = false
+  if (ok) {
+    payment.status = data.status
+    if (data.status === 'PAID') {
+      _stopPaymentPoll()
+      showToast('Оплата прошла успешно')
+    }
+  } else {
+    payment.error = error || 'Не удалось получить статус'
+  }
+}
+
+/** Автопроверка статуса раз в 10 с, не дольше 2 минут. */
+function _startPaymentPoll(viewingId) {
+  _stopPaymentPoll()
+  let attempts = 0
+  payment.pollTimer = setInterval(async () => {
+    attempts += 1
+    if (attempts > 12) {        // 12 × 10 с = 2 мин
+      _stopPaymentPoll()
+      return
+    }
+    const { ok, data } = await tasksApi.getViewingPaymentStatus(viewingId)
+    if (ok) {
+      payment.status = data.status
+      if (['PAID', 'CANCELLED', 'EXPIRED'].includes(data.status)) {
+        _stopPaymentPoll()
+        if (data.status === 'PAID') showToast('Оплата прошла успешно')
+      }
+    }
+  }, 10_000)
+}
+
+function _stopPaymentPoll() {
+  if (payment.pollTimer) {
+    clearInterval(payment.pollTimer)
+    payment.pollTimer = null
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -680,6 +875,34 @@ onMounted(load)
   border-radius: 8px;
   font-size: 13px;
 }
+
+.payment-block {
+  padding: 16px;
+  background: var(--c-paper-2, #f5f7f6);
+  border-radius: 10px;
+  border: 1px solid #dbe6e4;
+}
+
+.payment-status-card {
+  padding: 12px 14px;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #dbe6e4;
+}
+
+.payment-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  background: #e8f0ef;
+  color: #4a6d68;
+}
+.payment-badge--paid      { background: #d4f5e9; color: #0a5c38; }
+.payment-badge--cancelled { background: #fdece9; color: #9a3b32; }
+.payment-badge--expired   { background: #fff3e0; color: #8a5700; }
+.payment-badge--created   { background: #e3effe; color: #1a4b8c; }
 
 .steps-log {
   margin-top: 12px;
